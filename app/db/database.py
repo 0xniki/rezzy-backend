@@ -596,6 +596,100 @@ class Database:
             """)
             return [dict(r) for r in records]
     
+    async def get_special_hours(self, date_from: date = None, date_to: date = None) -> List[Dict[str, Any]]:
+        """Get special hours for holidays and events with optional date range filtering."""
+        query = """
+        SELECT id, date, open_time, close_time, last_reservation_time, 
+            is_closed, name, description, created_at, updated_at
+        FROM special_hours
+        """
+        
+        values = []
+        conditions = []
+        
+        if date_from:
+            conditions.append(f"date >= ${len(values) + 1}")
+            values.append(date_from)
+        
+        if date_to:
+            conditions.append(f"date <= ${len(values) + 1}")
+            values.append(date_to)
+        
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        query += " ORDER BY date"
+        
+        async with self.pool.acquire() as conn:
+            records = await conn.fetch(query, *values)
+            return [dict(r) for r in records]
+
+    async def get_special_hours_by_date(self, date_val: date) -> Dict[str, Any]:
+        """Get special hours for a specific date."""
+        async with self.pool.acquire() as conn:
+            record = await conn.fetchrow("""
+            SELECT id, date, open_time, close_time, last_reservation_time, 
+                is_closed, name, description, created_at, updated_at
+            FROM special_hours
+            WHERE date = $1
+            """, date_val)
+            return dict(record) if record else None
+
+    async def set_special_hours(
+        self, 
+        date_val: date,
+        name: str,
+        description: str = None,
+        is_closed: bool = False,
+        open_time: time = None,
+        close_time: time = None,
+        last_reservation_time: time = None
+    ) -> Dict[str, Any]:
+        """Set special hours for a specific date (holiday or event)."""
+        async with self.pool.acquire() as conn:
+            # Ensure times are provided if not closed
+            if not is_closed:
+                if not open_time or not close_time or not last_reservation_time:
+                    raise ValueError("Open time, close time, and last reservation time must be provided if not closed")
+                
+                # Validate times
+                if close_time <= open_time:
+                    raise ValueError("Close time must be after open time")
+                
+                if last_reservation_time <= open_time or last_reservation_time >= close_time:
+                    raise ValueError("Last reservation time must be between open and close time")
+            
+            record = await conn.fetchrow("""
+            INSERT INTO special_hours (
+                date, name, description, is_closed, 
+                open_time, close_time, last_reservation_time
+            ) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (date) 
+            DO UPDATE SET 
+                name = $2,
+                description = $3,
+                is_closed = $4,
+                open_time = $5,
+                close_time = $6,
+                last_reservation_time = $7
+            RETURNING 
+                id, date, open_time, close_time, last_reservation_time, 
+                is_closed, name, description, created_at, updated_at
+            """, 
+            date_val, name, description, is_closed, 
+            open_time, close_time, last_reservation_time
+            )
+            return dict(record)
+
+    async def delete_special_hours(self, special_hours_id: UUID) -> bool:
+        """Delete special hours."""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("""
+            DELETE FROM special_hours WHERE id = $1
+            """, special_hours_id)
+            return result == "DELETE 1"
+
     async def set_hours(
         self, 
         day_of_week: int,
@@ -622,6 +716,7 @@ class Database:
             )
             return dict(record)
     
+    # Modify this existing method to check special hours
     async def is_valid_reservation_time(
         self,
         reservation_date: date,
@@ -629,14 +724,38 @@ class Database:
         duration_minutes: int = 90
     ) -> bool:
         """Check if a reservation time is valid based on restaurant hours."""
-        # Calculate day of week (0-6, Monday is 0)
-        day_of_week = reservation_date.weekday()
-        
         # Calculate end time
         end_time_dt = datetime.combine(datetime.min, start_time) + timedelta(minutes=duration_minutes)
         end_time = end_time_dt.time()
         
         async with self.pool.acquire() as conn:
+            # First check if this is a special day (holiday, event, etc.)
+            special_day = await conn.fetchrow("""
+            SELECT is_closed, open_time, close_time, last_reservation_time
+            FROM special_hours
+            WHERE date = $1
+            """, reservation_date)
+            
+            if special_day:
+                # If restaurant is closed on this special day
+                if special_day['is_closed']:
+                    return False
+                    
+                # Use special day hours
+                if start_time < special_day['open_time']:
+                    return False
+                    
+                if start_time > special_day['last_reservation_time']:
+                    return False
+                    
+                if end_time > special_day['close_time']:
+                    return False
+                    
+                return True
+            
+            # If not a special day, continue with regular hour check
+            day_of_week = reservation_date.weekday()
+            
             hours = await conn.fetchrow("""
             SELECT open_time, close_time, last_reservation_time
             FROM restaurant_hours
@@ -647,15 +766,13 @@ class Database:
                 # No hours set for this day (restaurant closed)
                 return False
                 
-            # Check if reservation starts after opening time
+            # Check against regular hours
             if start_time < hours['open_time']:
                 return False
                 
-            # Check if reservation starts before last reservation time
             if start_time > hours['last_reservation_time']:
                 return False
                 
-            # Check if reservation ends before closing time
             if end_time > hours['close_time']:
                 return False
                 

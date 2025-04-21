@@ -1,13 +1,26 @@
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import FastAPI, HTTPException, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
 from uuid import UUID
+import time as pytime
 from datetime import date, time, datetime
 import uvicorn
 from pydantic import BaseModel, Field, field_validator
 from contextlib import asynccontextmanager
+import logging
 
 from app.db.database import db
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        # logging.FileHandler("rezzy_api.log")
+    ]
+)
+
+logger = logging.getLogger("rezzy")
 
 # Pydantic models for request/response validation
 class TableBase(BaseModel):
@@ -169,6 +182,68 @@ class AvailabilityResponse(BaseModel):
     available_tables: List[Dict[str, Any]]
     is_valid_time: bool
 
+class SpecialHoursBase(BaseModel):
+    date: date
+    name: str
+    description: Optional[str] = None
+    is_closed: bool = False
+    open_time: Optional[time] = None
+    close_time: Optional[time] = None
+    last_reservation_time: Optional[time] = None
+    
+    @field_validator('open_time', 'close_time', 'last_reservation_time')
+    def times_required_if_open(cls, v, info):
+        is_closed = info.data.get('is_closed', False)
+        if not is_closed and v is None:
+            field_name = info.field_name
+            raise ValueError(f"{field_name} is required when restaurant is open")
+        return v
+    
+    @field_validator('close_time')
+    def close_time_must_be_after_open(cls, v, values):
+        if v is None:
+            return v
+        
+        is_closed = values.data.get('is_closed', False)
+        if is_closed:
+            return v
+            
+        open_time = values.data.get('open_time')
+        if open_time and v <= open_time:
+            raise ValueError('close_time must be after open_time')
+        return v
+    
+    @field_validator('last_reservation_time')
+    def last_reservation_time_must_be_valid(cls, v, values):
+        if v is None:
+            return v
+            
+        is_closed = values.data.get('is_closed', False)
+        if is_closed:
+            return v
+            
+        open_time = values.data.get('open_time')
+        close_time = values.data.get('close_time')
+        
+        if open_time and v <= open_time:
+            raise ValueError('last_reservation_time must be after open_time')
+            
+        if close_time and v >= close_time:
+            raise ValueError('last_reservation_time must be before close_time')
+            
+        return v
+
+class SpecialHoursCreate(SpecialHoursBase):
+    pass
+
+class SpecialHoursResponse(SpecialHoursBase):
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
 # Define lifespan context manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -199,6 +274,32 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = pytime.time()
+    
+    # Get request details
+    path = request.url.path
+    query_params = str(request.query_params)
+    client_host = request.client.host if request.client else "unknown"
+    method = request.method
+    
+    # Log request
+    logger.info(f"Request: {method} {path} - Params: {query_params} - Client: {client_host}")
+    
+    # Process request
+    try:
+        response = await call_next(request)
+        
+        # Log response
+        process_time = pytime.time() - start_time
+        logger.info(f"Response: {method} {path} - Status: {response.status_code} - Time: {process_time:.3f}s")
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error handling request {method} {path}: {str(e)}")
+        raise
 
 # Tables API
 @app.get("/tables", response_model=List[TableResponse])
@@ -465,6 +566,49 @@ async def set_restaurant_hours(hours: RestaurantHoursBase):
         hours.close_time,
         hours.last_reservation_time
     )
+
+@app.get("/special-hours", response_model=List[SpecialHoursResponse])
+async def get_special_hours(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None
+):
+    """Get all special hours with optional date range filtering."""
+    return await db.get_special_hours(date_from, date_to)
+
+@app.get("/special-hours/{date_str}", response_model=Optional[SpecialHoursResponse])
+async def get_special_hours_by_date(date_str: str):
+    """Get special hours for a specific date."""
+    try:
+        year, month, day = map(int, date_str.split('-'))
+        date_val = date(year, month, day)
+        special_hours = await db.get_special_hours_by_date(date_val)
+        if not special_hours:
+            return None
+        return special_hours
+    except ValueError as e:
+        logger.error(f"Error parsing date: {date_str}, error: {str(e)}")
+        return None
+
+@app.put("/special-hours", response_model=SpecialHoursResponse)
+async def set_special_hours(special_hours: SpecialHoursCreate):
+    """Set special hours for a date (holiday or event)."""
+    return await db.set_special_hours(
+        special_hours.date,
+        special_hours.name,
+        special_hours.description,
+        special_hours.is_closed,
+        special_hours.open_time,
+        special_hours.close_time,
+        special_hours.last_reservation_time
+    )
+
+@app.delete("/special-hours/{special_hours_id}")
+async def delete_special_hours(special_hours_id: UUID):
+    """Delete special hours."""
+    success = await db.delete_special_hours(special_hours_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Special hours not found")
+    return {"status": "success", "message": "Special hours deleted"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -32,6 +32,20 @@ CREATE TABLE restaurant_hours (
     UNIQUE (day_of_week)
 );
 
+CREATE TABLE special_hours (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    date DATE NOT NULL,
+    open_time TIME,
+    close_time TIME,
+    last_reservation_time TIME,
+    is_closed BOOLEAN NOT NULL DEFAULT FALSE,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (date)
+);
+
 CREATE TABLE customers (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(100) NOT NULL,
@@ -85,7 +99,8 @@ CREATE TRIGGER update_chairs_timestamp BEFORE UPDATE ON chairs
     
 CREATE TRIGGER update_restaurant_hours_timestamp BEFORE UPDATE ON restaurant_hours
     FOR EACH ROW EXECUTE PROCEDURE update_timestamp();
-    
+CREATE TRIGGER update_special_hours_timestamp BEFORE UPDATE ON special_hours
+    FOR EACH ROW EXECUTE PROCEDURE update_timestamp();
 CREATE TRIGGER update_customers_timestamp BEFORE UPDATE ON customers
     FOR EACH ROW EXECUTE PROCEDURE update_timestamp();
     
