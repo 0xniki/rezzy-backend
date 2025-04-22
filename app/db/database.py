@@ -1,7 +1,9 @@
 import os
 import logging
+import hashlib
 from typing import Optional, List, Dict, Any, Union
 import asyncpg
+from asyncpg.connection import Connection
 from asyncpg.pool import Pool
 from datetime import datetime, date, time, timedelta
 from uuid import UUID
@@ -292,6 +294,18 @@ class Database:
         table_ids: List[UUID]
     ) -> Dict[str, Any]:
         """Create a reservation with customer info and table assignments."""
+        
+        # Generate placeholder contact info if needed
+        has_email = 'email' in customer_data and customer_data['email']
+        has_phone = 'phone' in customer_data and customer_data['phone']
+        
+        if not has_email and not has_phone and reservation_data['party_size'] < 6:
+            # Create a deterministic hash based on name
+            name = customer_data['name']
+            name_hash = hashlib.md5(name.lower().strip().encode()).hexdigest()[:8]
+            placeholder_email = f"guest-{name_hash}@restaurant.local"
+            customer_data['email'] = placeholder_email
+        
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 # 1. Create or get existing customer
@@ -355,13 +369,16 @@ class Database:
                     VALUES ($1, $2)
                     """, reservation_id, table_id)
                 
-                # 4. Return complete reservation
-                result = await self.get_reservation_by_id(reservation_id)
+                result = await self.get_reservation_by_id(reservation_id, conn)
                 return result
     
-    async def get_reservation_by_id(self, reservation_id: UUID) -> Dict[str, Any]:
+    async def get_reservation_by_id(self, reservation_id: UUID, conn=Optional[Connection]) -> Dict[str, Any]:
         """Get a complete reservation with customer and table info."""
-        async with self.pool.acquire() as conn:
+        # Use provided connection or acquire a new one
+        use_provided_conn = conn is not None
+        conn = conn or await self.pool.acquire()
+        
+        try:
             # Get reservation and customer info
             reservation = await conn.fetchrow("""
             SELECT 
@@ -396,6 +413,10 @@ class Database:
             result = dict(reservation)
             result['tables'] = [dict(t) for t in tables]
             return result
+        finally:
+            # Only release the connection if we acquired it
+            if not use_provided_conn and conn:
+                await conn.close()
     
     async def get_reservations(
         self, 
@@ -778,5 +799,21 @@ class Database:
                 
             return True
 
-
+def generate_placeholder_contact(name: str, party_size: int) -> dict:
+    """Generate placeholder contact info for small parties without provided contact details."""
+    if party_size < 6:
+        # Create a deterministic hash based on name
+        name_hash = hashlib.md5(name.lower().strip().encode()).hexdigest()[:8]
+        placeholder_email = f"guest-{name_hash}@restaurant.local"
+        return {
+            "email": placeholder_email,
+            "phone": None
+        }
+    else:
+        # For larger parties, don't provide a fallback
+        return {
+            "email": None,
+            "phone": None
+        }
+    
 db = Database()
