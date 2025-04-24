@@ -393,7 +393,7 @@ async def create_reservation(reservation: ReservationCreate):
     is_valid = await db.is_valid_reservation_time(
         reservation.reservation_date,
         reservation.start_time,
-        reservation.duration_minutes
+        # reservation.duration_minutes
     )
     
     if not is_valid:
@@ -450,7 +450,7 @@ async def update_reservation(reservation_id: UUID, reservation: ReservationUpdat
         
         # Check if new time is valid
         is_valid = await db.is_valid_reservation_time(
-            check_date, check_time, check_duration
+            check_date, check_time, # check_duration
         )
         
         if not is_valid:
@@ -533,7 +533,7 @@ async def check_availability(request: AvailabilityRequest):
     is_valid = await db.is_valid_reservation_time(
         request.reservation_date,
         request.start_time,
-        request.duration_minutes
+        # request.duration_minutes
     )
     
     # Get available tables
