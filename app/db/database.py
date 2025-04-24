@@ -742,11 +742,11 @@ class Database:
         self,
         reservation_date: date,
         start_time: time,
-        duration_minutes: int = 90
+        # duration_minutes: int = 90
     ) -> bool:
         """Check if a reservation time is valid based on restaurant hours."""
         # Calculate end time
-        end_time_dt = datetime.combine(datetime.min, start_time) + timedelta(minutes=duration_minutes)
+        end_time_dt = datetime.combine(datetime.min, start_time) + timedelta(minutes=30)
         end_time = end_time_dt.time()
         
         async with self.pool.acquire() as conn:
